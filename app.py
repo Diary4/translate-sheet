@@ -1,47 +1,57 @@
+# To run this code you need:
+# pip install google-genai pandas openpyxl
+
+import os
 import pandas as pd
-from transformers import pipeline
-from tqdm import tqdm
+from google import genai
+from google.genai import types
 
-# --- Load translation models ---
-translator_ar = pipeline("translation", model="Helsinki-NLP/opus-mt-en-ar")
-translator_ku = pipeline("translation", model="Helsinki-NLP/opus-mt-en-ku")
+API_KEY = "AIzaSyDrYmMzDpPPCCKaxvR3uG_03NktfbS8Kkc"
 
-# --- Step 1: Read the CSV file ---
-input_file = "input.csv"   # change this to your file
-df = pd.read_csv(input_file)
+client = genai.Client(api_key=API_KEY)
 
-# --- Step 2: Select column to translate ---
-column_to_translate = "Text"   # change to the column name containing English text
-
-# --- Step 3: Add progress bar and translate ---
-tqdm.pandas()
-
-def translate_to_arabic(text):
-    if pd.isna(text):
+def translate_text(text, target_language):
+    """Translate English text into target language using Gemini."""
+    if not text or pd.isna(text):
         return ""
+
+    model = "gemini-2.5-flash"
+
+    contents = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(
+                text=f"Translate the following English text into {target_language}. "
+                     f"Return only the translated text, no explanations.\n\n{text}"
+            )],
+        ),
+    ]
+
     try:
-        return translator_ar(text, max_length=400)[0]['translation_text']
+        response = client.models.generate_content(model=model, contents=contents)
+        if response and response.candidates and response.candidates[0].content.parts:
+            return response.candidates[0].content.parts[0].text.strip()
     except Exception as e:
-        print(f"Error (Arabic): {text} → {e}")
-        return text
+        print(f"⚠️ Error translating '{text[:40]}...': {e}")
+    return ""
 
-def translate_to_kurdish(text):
-    if pd.isna(text):
-        return ""
-    try:
-        return translator_ku(text, max_length=400)[0]['translation_text']
-    except Exception as e:
-        print(f"Error (Kurdish): {text} → {e}")
-        return text
+def translate_csv(input_path, output_path):
+    """Read CSV, translate column, and save to new Excel file."""
+    df = pd.read_csv(input_path)
 
-print("🔄 Translating English → Arabic...")
-df["Arabic_Translation"] = df[column_to_translate].progress_apply(translate_to_arabic)
+    if "description" not in df.columns:
+        print("❌ CSV must have a column named 'description'")
+        return
 
-print("🔄 Translating English → Kurdish...")
-df["Kurdish_Translation"] = df[column_to_translate].progress_apply(translate_to_kurdish)
+    print("🔄 Translating... this may take a while")
 
-# --- Step 4: Save to new Excel file ---
-output_file = "translated_output.xlsx"
-df.to_excel(output_file, index=False)
+    df["Arabic"] = df["description"].apply(lambda x: translate_text(x, "Arabic"))
+    df["Kurdish (Sorani)"] = df["description"].apply(lambda x: translate_text(x, "Kurdish (Sorani)"))
 
-print(f"✅ Done! Translations saved to {output_file}")
+    df.to_excel(output_path, index=False)
+    print(f"✅ Translations saved to: {output_path}")
+
+if __name__ == "__main__":
+    input_csv = "Candles.csv"      # your input file
+    output_excel = "translated.xlsx"  # output file
+    translate_csv(input_csv, output_excel)
