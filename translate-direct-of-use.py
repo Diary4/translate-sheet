@@ -3,6 +3,8 @@
 
 import os
 import csv
+import sys
+import time
 from google import genai
 from google.genai import types
 
@@ -33,9 +35,33 @@ def translate(text, target_language):
         return response.candidates[0].content.parts[0].text
     return "[No translation]"
 
+def translate_with_retry(text, target_language, max_attempts=5, backoff_seconds=2):
+    """Translate with simple retry/backoff. If rate limited after max attempts, raise a sentinel error."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return translate(text, target_language)
+        except Exception as e:
+            message = str(e).lower()
+            is_rate_limit = (
+                "rate limit" in message
+                or "429" in message
+                or "resource exhausted" in message
+                or "quota" in message
+            )
+            if not is_rate_limit:
+                raise
+            if attempt == max_attempts:
+                print("\n⚠️ Rate limit exceeded after 5 attempts")
+                # Raise a sentinel error we can catch to save progress & exit
+                raise RuntimeError("Rate limit exceeded after 5 attempts")
+            # Exponential backoff
+            sleep_seconds = backoff_seconds * (2 ** (attempt - 1))
+            time.sleep(sleep_seconds)
+
 if __name__ == "__main__":
     input_csv = "Candles.csv"
     output_csv = "Candles_translated.csv"
+    start_from_row = 39  # 1-based index
     
     # Read the CSV file
     rows = []
@@ -50,23 +76,57 @@ if __name__ == "__main__":
         "direct_of_use_arabic", "direct_of_use_kurdish"
     ])
     
+    # Optionally preload existing output to reuse earlier rows
+    existing_output_rows = []
+    if os.path.exists(output_csv):
+        try:
+            with open(output_csv, "r", encoding="utf-8") as f_out:
+                reader_out = csv.DictReader(f_out)
+                existing_output_rows = list(reader_out)
+        except Exception:
+            existing_output_rows = []
+
     # Process each row and translate
     translated_rows = []
     total_rows = len(rows)
     
+    def save_progress_and_exit():
+        print(f"\n📝 Saving translations to {output_csv}...")
+        with open(output_csv, "w", encoding="utf-8", newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=new_fieldnames)
+            writer.writeheader()
+            writer.writerows(translated_rows)
+        print(f"\n✅ Saved {len(translated_rows)} translated rows to {output_csv}")
+        sys.exit(1)
+
     for idx, row in enumerate(rows, 1):
+        # Reuse/skip until start_from_row - 1
+        if idx < start_from_row:
+            # Prefer the previously translated row if available
+            if existing_output_rows and idx <= len(existing_output_rows):
+                translated_rows.append(existing_output_rows[idx - 1])
+            else:
+                # Carry over the original row unchanged
+                translated_rows.append(row)
+            continue
+
         print(f"\n[{idx}/{total_rows}] Processing: {row.get('item_name', 'N/A')[:50]}...")
-        
+
         # Translate description only
         direct_of_use = row.get('direct_of_use', '').strip()
         if direct_of_use:
             print(f"  Translating direct_of_use...")
-            row['direct_of_use_arabic'] = translate(direct_of_use, "Arabic")
-            row['direct_of_use_kurdish'] = translate(direct_of_use, "Kurdish (Sorani)")
+            try:
+                row['direct_of_use_arabic'] = translate_with_retry(direct_of_use, "Arabic")
+                row['direct_of_use_kurdish'] = translate_with_retry(direct_of_use, "Kurdish (Sorani)")
+            except RuntimeError as e:
+                # Save partial progress and stop when rate limit warning occurs
+                translated_rows.append(row)
+                save_progress_and_exit()
         else:
             row['direct_of_use_arabic'] = ""
             row['direct_of_use_kurdish'] = ""
-        
+
         translated_rows.append(row)
     
     # Write to new CSV file
